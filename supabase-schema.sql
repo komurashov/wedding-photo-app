@@ -19,6 +19,10 @@ create table if not exists public.uploads (
 create index if not exists uploads_device_id_idx on public.uploads (device_id);
 create index if not exists uploads_created_at_idx on public.uploads (created_at desc);
 
+-- Защита от дублей: один и тот же файл (public_id) нельзя записать дважды.
+-- Делает confirm идемпотентным (повтор при плохой сети не создаёт дубль).
+create unique index if not exists uploads_public_id_key on public.uploads (public_id);
+
 -- Включаем RLS. Доступ к таблице — только через service_role (сервер).
 -- Анонимный ключ ничего не видит и не пишет. Никаких политик не добавляем.
 alter table public.uploads enable row level security;

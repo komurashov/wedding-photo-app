@@ -36,6 +36,29 @@ export async function POST(request) {
     if (countErr) throw countErr;
 
     const used = count || 0;
+
+    // Идемпотентность: если это фото (public_id) уже сохранено — не дубль.
+    // Возвращаем существующую строку как успех (повторный confirm при плохой сети).
+    const { data: existing } = await supabase
+      .from(TABLE)
+      .select("id, device_id")
+      .eq("public_id", publicId)
+      .maybeSingle();
+    if (existing) {
+      return NextResponse.json(
+        {
+          ok: true,
+          id: existing.id,
+          public_id: publicId,
+          count: used,
+          max,
+          remaining: Math.max(0, max - used),
+          deduped: true,
+        },
+        { headers: NO_STORE }
+      );
+    }
+
     if (used >= max) {
       return NextResponse.json(
         { error: "limit_reached", count: used, max, remaining: 0 },
@@ -57,7 +80,29 @@ export async function POST(request) {
       })
       .select("id")
       .single();
-    if (insertErr) throw insertErr;
+    if (insertErr) {
+      // гонка: кто-то успел вставить тот же public_id между проверкой и вставкой
+      if (insertErr.code === "23505") {
+        const { data: e2 } = await supabase
+          .from(TABLE)
+          .select("id")
+          .eq("public_id", publicId)
+          .maybeSingle();
+        return NextResponse.json(
+          {
+            ok: true,
+            id: e2?.id,
+            public_id: publicId,
+            count: used,
+            max,
+            remaining: Math.max(0, max - used),
+            deduped: true,
+          },
+          { headers: NO_STORE }
+        );
+      }
+      throw insertErr;
+    }
 
     const newCount = used + 1;
     return NextResponse.json(

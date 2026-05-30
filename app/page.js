@@ -103,31 +103,36 @@ export default function Home() {
     setItems((arr) => arr.map((x) => (x.key === key ? { ...x, ...patch } : x)));
   }
 
-  // загрузка одного файла: подпись -> Cloudinary -> confirm
-  async function uploadOne(key, file) {
+  // загрузка одного файла: (подпись -> Cloudinary) -> confirm
+  // cached — уже загруженный в Cloudinary результат (для «Повторить» без повторной заливки)
+  async function uploadOne(key, file, cached) {
     patchItem(key, { status: "uploading" });
     try {
-      // 1) подпись + проверка лимита
-      const sr = await fetch("/api/sign-upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device_id: deviceId }),
-      });
-      const sign = await sr.json();
-      if (!sr.ok) {
-        if (sign.error === "limit_reached") {
-          setCount(sign.count ?? MAX);
-          setRemaining(0);
-          setBanner({ type: "done", text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛` });
+      let uploaded = cached;
+
+      // 1) если файл ещё не в Cloudinary — подписываем и грузим
+      if (!uploaded) {
+        const sr = await fetch("/api/sign-upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_id: deviceId }),
+        });
+        const sign = await sr.json();
+        if (!sr.ok) {
+          if (sign.error === "limit_reached") {
+            setCount(sign.count ?? MAX);
+            setRemaining(0);
+            setBanner({ type: "done", text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛` });
+          }
+          patchItem(key, { status: "failed" });
+          return sign.error === "limit_reached" ? "limit" : "fail";
         }
-        patchItem(key, { status: "failed" });
-        return sign.error === "limit_reached" ? "limit" : "fail";
+        uploaded = await uploadToCloudinary(file, sign);
+        // запоминаем результат на плитке — повтор не будет грузить файл заново
+        patchItem(key, { uploaded });
       }
 
-      // 2) загрузка в Cloudinary
-      const uploaded = await uploadToCloudinary(file, sign);
-
-      // 3) подтверждение/запись
+      // 2) подтверждение/запись (идемпотентно по public_id)
       const cr = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -173,6 +178,28 @@ export default function Home() {
     }
   }
 
+  // сверка плиток с сервером: мнимые ошибки (фото реально сохранилось) -> «загружено»
+  async function reconcile(id) {
+    try {
+      const r = await fetch(`/api/my-photos?device_id=${encodeURIComponent(id || deviceId)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      const byPid = new Map((d.photos || []).map((p) => [p.public_id, p]));
+      setItems((arr) =>
+        arr.map((it) => {
+          const pid = it.publicId || it.uploaded?.public_id;
+          if (pid && byPid.has(pid)) {
+            const p = byPid.get(pid);
+            return { ...it, status: "done", id: p.id, publicId: pid, preview: thumb(p.secure_url) };
+          }
+          return it;
+        })
+      );
+      setCount(d.count);
+      setRemaining(d.remaining);
+    } catch {}
+  }
+
   async function handleFiles(e) {
     const input = e.target;
     const files = Array.from(input.files || []);
@@ -206,6 +233,8 @@ export default function Home() {
       if (res === "ok") ok++;
       else if (res === "limit") limit = true;
     }
+    // сверяемся с сервером: «мнимые» ошибки превратятся в загруженные
+    await reconcile(deviceId);
     setBusy(false);
     if (!limit && ok > 0) {
       setBanner({
@@ -218,10 +247,11 @@ export default function Home() {
     }
   }
 
-  function retry(item) {
-    if (!item.file) return;
+  async function retry(item) {
     setBanner(null);
-    uploadOne(item.key, item.file);
+    // если файл уже залит в Cloudinary — не грузим заново, только подтверждаем
+    await uploadOne(item.key, item.file, item.uploaded || null);
+    await reconcile(deviceId);
   }
 
   async function removePhoto(item) {
