@@ -121,7 +121,7 @@ export default function Home() {
           setBanner({ type: "done", text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛` });
         }
         patchItem(key, { status: "failed" });
-        return;
+        return sign.error === "limit_reached" ? "limit" : "fail";
       }
 
       // 2) загрузка в Cloudinary
@@ -148,8 +148,9 @@ export default function Home() {
           setCount(cd.count ?? MAX);
           setRemaining(0);
           setBanner({ type: "done", text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛` });
+          return "limit";
         }
-        return;
+        return "fail";
       }
 
       patchItem(key, {
@@ -162,10 +163,13 @@ export default function Home() {
       setRemaining(cd.remaining);
       if (cd.remaining <= 0) {
         setBanner({ type: "done", text: `Готово! Загружено все ${MAX} фото. Спасибо! 💛` });
+        return "limit";
       }
+      return "ok";
     } catch {
       patchItem(key, { status: "failed" });
       setBanner({ type: "err", text: "Не удалось загрузить фото. Можно повторить." });
+      return "fail";
     }
   }
 
@@ -195,10 +199,23 @@ export default function Home() {
       file,
     }));
     setItems((arr) => [...newItems, ...arr]);
+    let ok = 0;
+    let limit = false;
     for (const it of newItems) {
-      await uploadOne(it.key, it.file);
+      const res = await uploadOne(it.key, it.file);
+      if (res === "ok") ok++;
+      else if (res === "limit") limit = true;
     }
     setBusy(false);
+    if (!limit && ok > 0) {
+      setBanner({
+        type: "ok",
+        text:
+          ok === newItems.length
+            ? `Готово, ${ok === 1 ? "фото загружено" : "фото загружены"} ✓`
+            : `Загружено ${ok} из ${newItems.length} ✓`,
+      });
+    }
   }
 
   function retry(item) {
@@ -232,6 +249,20 @@ export default function Home() {
       setBanner({ type: "err", text: "Нет соединения." });
     }
   }
+
+  const uploadingCount = items.filter((i) => i.status === "uploading").length;
+
+  // пока идёт загрузка — предупреждаем при попытке закрыть/уйти со страницы
+  useEffect(() => {
+    if (uploadingCount === 0) return;
+    const handler = (e) => {
+      e.preventDefault();
+      e.returnValue = "";
+      return "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [uploadingCount]);
 
   const pct = Math.min(100, Math.round((count / MAX) * 100));
 
@@ -277,6 +308,13 @@ export default function Home() {
             Из галереи
           </button>
         </div>
+
+        {uploadingCount > 0 && (
+          <div className="banner warn">
+            <span className="mini-spinner" /> Загружается {uploadingCount}{" "}
+            {uploadingCount === 1 ? "фото" : "фото"}… Не закрывайте страницу до завершения.
+          </div>
+        )}
 
         {banner && <div className={`banner ${banner.type}`}>{banner.text}</div>}
 

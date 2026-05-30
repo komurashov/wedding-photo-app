@@ -214,6 +214,27 @@ input[type="text"]:focus {
   font-weight: 600;
 }
 
+.banner.warn {
+  background: #fbf1e0;
+  color: #9a6b1f;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.mini-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #e6cfa6;
+  border-top-color: #9a6b1f;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
