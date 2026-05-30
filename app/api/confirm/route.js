@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
-import { getSupabase } from "../../../lib/supabase";
+import { getSupabase, TABLE } from "../../../lib/supabase";
 import { maxPhotos, isValidDeviceId, cleanName } from "../../../lib/limits";
 
 export const dynamic = "force-dynamic";
 
 // POST /api/confirm  { device_id, name, public_id, secure_url, bytes, width, height }
-// Главная серверная проверка лимита: вставка идёт через RPC, которая
-// атомарно считает кол-во фото устройства и отклоняет вставку при превышении.
+// Серверная проверка лимита: считаем фото устройства в базе и вставляем
+// новую строку только если лимит не превышен. Используем обычные операции
+// с таблицей (тот же путь, что и /api/count) — без RPC.
 export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -25,41 +26,43 @@ export async function POST(request) {
     const supabase = getSupabase();
     const max = maxPhotos();
 
-    const { data, error } = await supabase.rpc("insert_upload_if_allowed", {
-      p_device_id: deviceId,
-      p_guest_name: name,
-      p_public_id: publicId,
-      p_secure_url: secureUrl,
-      p_bytes: Number.isFinite(body.bytes) ? body.bytes : null,
-      p_width: Number.isFinite(body.width) ? body.width : null,
-      p_height: Number.isFinite(body.height) ? body.height : null,
-      p_max: max,
-    });
+    // 1) сколько уже загружено этим устройством
+    const { count, error: countErr } = await supabase
+      .from(TABLE)
+      .select("id", { count: "exact", head: true })
+      .eq("device_id", deviceId);
+    if (countErr) throw countErr;
 
-    if (error) throw error;
-
-    // RPC возвращает { allowed, count }
-    const row = Array.isArray(data) ? data[0] : data;
-    const allowed = row?.allowed;
-    const used = row?.count ?? 0;
-
-    if (!allowed) {
+    const used = count || 0;
+    if (used >= max) {
       return NextResponse.json(
         { error: "limit_reached", count: used, max, remaining: 0 },
         { status: 403 }
       );
     }
 
+    // 2) вставляем фото
+    const { error: insertErr } = await supabase.from(TABLE).insert({
+      device_id: deviceId,
+      guest_name: name,
+      public_id: publicId,
+      secure_url: secureUrl,
+      bytes: Number.isFinite(body.bytes) ? body.bytes : null,
+      width: Number.isFinite(body.width) ? body.width : null,
+      height: Number.isFinite(body.height) ? body.height : null,
+    });
+    if (insertErr) throw insertErr;
+
+    const newCount = used + 1;
     return NextResponse.json({
       ok: true,
-      count: used,
+      count: newCount,
       max,
-      remaining: Math.max(0, max - used),
+      remaining: Math.max(0, max - newCount),
     });
   } catch (e) {
-    return NextResponse.json(
-      { error: e.message || "server error" },
-      { status: 500 }
-    );
+    // обрезаем сообщение, чтобы в ответ не попадал гигантский HTML
+    const msg = (e?.message || "server error").toString().slice(0, 300);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
