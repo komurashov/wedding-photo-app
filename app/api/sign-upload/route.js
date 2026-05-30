@@ -4,6 +4,7 @@ import { getSupabase, TABLE } from "../../../lib/supabase";
 import { maxPhotos, isValidDeviceId } from "../../../lib/limits";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 // POST /api/sign-upload  { device_id }
 // Проверяет лимит по базе и, если есть место, возвращает подпись Cloudinary.

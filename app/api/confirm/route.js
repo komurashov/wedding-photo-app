@@ -3,6 +3,7 @@ import { getSupabase, TABLE } from "../../../lib/supabase";
 import { maxPhotos, isValidDeviceId, cleanName } from "../../../lib/limits";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const NO_STORE = { "Cache-Control": "no-store, max-age=0" };
 

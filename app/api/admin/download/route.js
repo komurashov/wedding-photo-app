@@ -3,6 +3,7 @@ import { v2 as cloudinary } from "cloudinary";
 import { checkAdminPassword } from "../../../../lib/admin";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const NO_STORE = { "Cache-Control": "no-store, max-age=0" };
 
