@@ -9,16 +9,12 @@ const SUBTITLE =
 
 // ---- device id: живёт в localStorage и в cookie (на 1 год) ----
 function readCookie(name) {
-  const m = document.cookie.match(
-    new RegExp("(?:^|; )" + name + "=([^;]*)")
-  );
+  const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   return m ? decodeURIComponent(m[1]) : null;
 }
 function writeCookie(name, value) {
   const oneYear = 60 * 60 * 24 * 365;
-  document.cookie = `${name}=${encodeURIComponent(
-    value
-  )}; path=/; max-age=${oneYear}; SameSite=Lax`;
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${oneYear}; SameSite=Lax`;
 }
 function genId() {
   if (window.crypto?.randomUUID) return window.crypto.randomUUID();
@@ -26,16 +22,18 @@ function genId() {
 }
 function ensureDeviceId() {
   let id = null;
-  try {
-    id = localStorage.getItem("wpa_device_id");
-  } catch {}
+  try { id = localStorage.getItem("wpa_device_id"); } catch {}
   if (!id) id = readCookie("wpa_device_id");
   if (!id) id = genId();
-  try {
-    localStorage.setItem("wpa_device_id", id);
-  } catch {}
+  try { localStorage.setItem("wpa_device_id", id); } catch {}
   writeCookie("wpa_device_id", id);
   return id;
+}
+
+// небольшое превью из Cloudinary
+function thumb(url) {
+  if (typeof url !== "string") return url;
+  return url.replace("/upload/", "/upload/c_fill,w_400,h_400,q_auto,f_auto/");
 }
 
 export default function Home() {
@@ -43,15 +41,14 @@ export default function Home() {
   const [name, setName] = useState("");
   const [count, setCount] = useState(0);
   const [remaining, setRemaining] = useState(MAX);
-  const [thumbs, setThumbs] = useState([]); // {key, url, status}
-  const [banner, setBanner] = useState(null); // {type, text}
+  const [items, setItems] = useState([]); // {key,status,preview,file?,id?,publicId?}
+  const [banner, setBanner] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const cameraRef = useRef(null);
   const galleryRef = useRef(null);
   const nameRef = useRef(null);
 
-  // ---- init ----
   useEffect(() => {
     const id = ensureDeviceId();
     setDeviceId(id);
@@ -59,26 +56,34 @@ export default function Home() {
       const savedName = localStorage.getItem("wpa_name");
       if (savedName) setName(savedName);
     } catch {}
-    refreshCount(id);
+    loadMine(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const refreshCount = useCallback(async (id) => {
+  // подгрузить счётчик и ранее загруженные фото
+  const loadMine = useCallback(async (id) => {
     try {
-      const r = await fetch(`/api/count?device_id=${encodeURIComponent(id)}`);
+      const r = await fetch(`/api/my-photos?device_id=${encodeURIComponent(id)}`);
       if (!r.ok) return;
       const d = await r.json();
       setCount(d.count);
       setRemaining(d.remaining);
+      setItems(
+        (d.photos || []).map((p) => ({
+          key: "srv-" + p.id,
+          status: "done",
+          preview: thumb(p.secure_url),
+          id: p.id,
+          publicId: p.public_id,
+        }))
+      );
     } catch {}
   }, []);
 
   function onNameChange(e) {
     const v = e.target.value;
     setName(v);
-    try {
-      localStorage.setItem("wpa_name", v);
-    } catch {}
+    try { localStorage.setItem("wpa_name", v); } catch {}
   }
 
   const limitReached = remaining <= 0;
@@ -94,116 +99,138 @@ export default function Home() {
     (kind === "camera" ? cameraRef : galleryRef).current?.click();
   }
 
-  async function handleFiles(e) {
-    const input = e.target;
-    const files = Array.from(input.files || []);
-    input.value = ""; // чтобы повторный выбор того же файла тоже сработал
-    if (!files.length) return;
+  function patchItem(key, patch) {
+    setItems((arr) => arr.map((x) => (x.key === key ? { ...x, ...patch } : x)));
+  }
 
-    setBanner(null);
-
-    // запрашиваем подпись + актуальный остаток с сервера
-    setBusy(true);
-    let sign;
+  // загрузка одного файла: подпись -> Cloudinary -> confirm
+  async function uploadOne(key, file) {
+    patchItem(key, { status: "uploading" });
     try {
-      const r = await fetch("/api/sign-upload", {
+      // 1) подпись + проверка лимита
+      const sr = await fetch("/api/sign-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device_id: deviceId }),
       });
-      sign = await r.json();
-      if (!r.ok) {
+      const sign = await sr.json();
+      if (!sr.ok) {
         if (sign.error === "limit_reached") {
           setCount(sign.count ?? MAX);
           setRemaining(0);
-          setBanner({
-            type: "done",
-            text: `Лимит достигнут: вы уже загрузили ${MAX} фото. Спасибо! 💛`,
-          });
-        } else {
-          setBanner({ type: "err", text: "Ошибка сервера. Попробуйте ещё раз." });
+          setBanner({ type: "done", text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛` });
         }
-        setBusy(false);
+        patchItem(key, { status: "failed" });
         return;
       }
+
+      // 2) загрузка в Cloudinary
+      const uploaded = await uploadToCloudinary(file, sign);
+
+      // 3) подтверждение/запись
+      const cr = await fetch("/api/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: deviceId,
+          name: name.trim(),
+          public_id: uploaded.public_id,
+          secure_url: uploaded.secure_url,
+          bytes: uploaded.bytes,
+          width: uploaded.width,
+          height: uploaded.height,
+        }),
+      });
+      const cd = await cr.json();
+      if (!cr.ok) {
+        patchItem(key, { status: "failed" });
+        if (cd.error === "limit_reached") {
+          setCount(cd.count ?? MAX);
+          setRemaining(0);
+          setBanner({ type: "done", text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛` });
+        }
+        return;
+      }
+
+      patchItem(key, {
+        status: "done",
+        id: cd.id,
+        publicId: cd.public_id,
+        preview: uploaded.secure_url ? thumb(uploaded.secure_url) : undefined,
+      });
+      setCount(cd.count);
+      setRemaining(cd.remaining);
+      if (cd.remaining <= 0) {
+        setBanner({ type: "done", text: `Готово! Загружено все ${MAX} фото. Спасибо! 💛` });
+      }
     } catch {
-      setBanner({ type: "err", text: "Нет соединения. Попробуйте ещё раз." });
-      setBusy(false);
-      return;
+      patchItem(key, { status: "failed" });
+      setBanner({ type: "err", text: "Не удалось загрузить фото. Можно повторить." });
     }
+  }
 
-    let slots = sign.remaining;
-    setRemaining(slots);
-    setCount(sign.count);
+  async function handleFiles(e) {
+    const input = e.target;
+    const files = Array.from(input.files || []);
+    input.value = "";
+    if (!files.length) return;
+    setBanner(null);
 
+    const available = remaining;
     let toUpload = files;
-    if (files.length > slots) {
-      toUpload = files.slice(0, slots);
+    if (files.length > available) {
+      toUpload = files.slice(0, available);
       setBanner({
         type: "err",
-        text: `Можно загрузить ещё ${slots}. Остальные фото пропущены.`,
+        text: `Можно загрузить ещё ${available}. Остальные фото пропущены.`,
       });
     }
+    if (toUpload.length === 0) return;
 
-    for (const file of toUpload) {
-      const key = genId();
-      const previewUrl = URL.createObjectURL(file);
-      setThumbs((t) => [{ key, url: previewUrl, status: "uploading" }, ...t]);
-
-      try {
-        const uploaded = await uploadToCloudinary(file, sign);
-        const conf = await fetch("/api/confirm", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            device_id: deviceId,
-            name: name.trim(),
-            public_id: uploaded.public_id,
-            secure_url: uploaded.secure_url,
-            bytes: uploaded.bytes,
-            width: uploaded.width,
-            height: uploaded.height,
-          }),
-        });
-        const cd = await conf.json();
-
-        if (!conf.ok) {
-          markThumb(key, "failed");
-          if (cd.error === "limit_reached") {
-            setCount(cd.count ?? MAX);
-            setRemaining(0);
-            setBanner({
-              type: "done",
-              text: `Лимит достигнут: ${MAX} фото. Спасибо! 💛`,
-            });
-            break;
-          }
-          continue;
-        }
-
-        markThumb(key, "done");
-        setCount(cd.count);
-        setRemaining(cd.remaining);
-        if (cd.remaining <= 0) {
-          setBanner({
-            type: "done",
-            text: `Готово! Вы загрузили все ${MAX} фото. Спасибо! 💛`,
-          });
-        }
-      } catch {
-        markThumb(key, "failed");
-        setBanner({
-          type: "err",
-          text: "Часть фото не загрузилась. Попробуйте ещё раз.",
-        });
-      }
+    setBusy(true);
+    const newItems = toUpload.map((file) => ({
+      key: genId(),
+      status: "uploading",
+      preview: URL.createObjectURL(file),
+      file,
+    }));
+    setItems((arr) => [...newItems, ...arr]);
+    for (const it of newItems) {
+      await uploadOne(it.key, it.file);
     }
-
     setBusy(false);
   }
 
-  function markThumb(key, status) {
-    setThumbs((t) => t.map((x) => (x.key === key ? { ...x, status } : x)));
+  function retry(item) {
+    if (!item.file) return;
+    setBanner(null);
+    uploadOne(item.key, item.file);
+  }
+
+  async function removePhoto(item) {
+    if (!item.id) return;
+    if (!window.confirm("Удалить это фото?")) return;
+    patchItem(item.key, { status: "deleting" });
+    try {
+      const r = await fetch("/api/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: deviceId, id: item.id }),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        patchItem(item.key, { status: "done" });
+        setBanner({ type: "err", text: "Не удалось удалить. Попробуйте ещё раз." });
+        return;
+      }
+      setItems((arr) => arr.filter((x) => x.key !== item.key));
+      setCount(d.count);
+      setRemaining(d.remaining);
+      setBanner(null);
+    } catch {
+      patchItem(item.key, { status: "done" });
+      setBanner({ type: "err", text: "Нет соединения." });
+    }
   }
 
   const pct = Math.min(100, Math.round((count / MAX) * 100));
@@ -241,19 +268,11 @@ export default function Home() {
         </div>
 
         <div className="buttons">
-          <button
-            className="btn btn-primary"
-            onClick={() => pick("camera")}
-            disabled={limitReached || busy}
-          >
+          <button className="btn btn-primary" onClick={() => pick("camera")} disabled={limitReached || busy}>
             <CameraIcon />
             Сделать фото
           </button>
-          <button
-            className="btn btn-secondary"
-            onClick={() => pick("gallery")}
-            disabled={limitReached || busy}
-          >
+          <button className="btn btn-secondary" onClick={() => pick("gallery")} disabled={limitReached || busy}>
             <GalleryIcon />
             Из галереи
           </button>
@@ -261,18 +280,26 @@ export default function Home() {
 
         {banner && <div className={`banner ${banner.type}`}>{banner.text}</div>}
 
-        {thumbs.length > 0 && (
+        {items.length > 0 && (
           <div className="grid">
-            {thumbs.map((t) => (
-              <div
-                key={t.key}
-                className={`thumb ${t.status === "failed" ? "failed" : ""}`}
-              >
-                <img src={t.url} alt="" />
-                {t.status === "uploading" && (
-                  <div className="spin">
-                    <div className="spinner" />
-                  </div>
+            {items.map((t) => (
+              <div key={t.key} className={`thumb ${t.status === "failed" ? "failed" : ""}`}>
+                <img src={t.preview} alt="" />
+
+                {(t.status === "uploading" || t.status === "deleting") && (
+                  <div className="spin"><div className="spinner" /></div>
+                )}
+
+                {t.status === "failed" && (
+                  <button className="retry-btn" onClick={() => retry(t)}>
+                    ↻ Повторить
+                  </button>
+                )}
+
+                {t.status === "done" && (
+                  <button className="del-btn" onClick={() => removePhoto(t)} aria-label="Удалить">
+                    ×
+                  </button>
                 )}
               </div>
             ))}
@@ -280,27 +307,13 @@ export default function Home() {
         )}
 
         <p className="hint">
-          Можно загрузить до {MAX} фото. Счётчик сохраняется, даже если вы
-          закроете страницу и снова отсканируете QR-код с этого устройства.
+          Можно загрузить до {MAX} фото. Счётчик и ваши фото сохраняются, даже если
+          вы закроете страницу и снова отсканируете QR-код с этого устройства.
         </p>
       </div>
 
-      <input
-        ref={cameraRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        hidden
-        onChange={handleFiles}
-      />
-      <input
-        ref={galleryRef}
-        type="file"
-        accept="image/*"
-        multiple
-        hidden
-        onChange={handleFiles}
-      />
+      <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={handleFiles} />
+      <input ref={galleryRef} type="file" accept="image/*" multiple hidden onChange={handleFiles} />
 
       <div className="footer">Спасибо, что делитесь моментами с нами ✨</div>
     </div>

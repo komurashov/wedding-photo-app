@@ -159,7 +159,16 @@ export default function Admin() {
                 target="_blank"
                 rel="noreferrer"
               >
-                <img src={thumb(p.secure_url)} alt="" loading="lazy" />
+                <img
+                  src={thumb(p.secure_url)}
+                  alt=""
+                  loading="lazy"
+                  onError={(e) => {
+                    // фото удалено из Cloudinary -> прячем плитку
+                    const card = e.currentTarget.closest(".admin-thumb");
+                    if (card) card.style.display = "none";
+                  }}
+                />
                 <span className="admin-meta">
                   <b>{p.guest_name || "—"}</b>
                   <i>{fmtDate(p.created_at)}</i>

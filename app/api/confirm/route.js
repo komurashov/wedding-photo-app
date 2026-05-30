@@ -42,21 +42,32 @@ export async function POST(request) {
       );
     }
 
-    // 2) вставляем фото
-    const { error: insertErr } = await supabase.from(TABLE).insert({
-      device_id: deviceId,
-      guest_name: name,
-      public_id: publicId,
-      secure_url: secureUrl,
-      bytes: Number.isFinite(body.bytes) ? body.bytes : null,
-      width: Number.isFinite(body.width) ? body.width : null,
-      height: Number.isFinite(body.height) ? body.height : null,
-    });
+    // 2) вставляем фото и забираем id строки (нужен для последующего удаления)
+    const { data: inserted, error: insertErr } = await supabase
+      .from(TABLE)
+      .insert({
+        device_id: deviceId,
+        guest_name: name,
+        public_id: publicId,
+        secure_url: secureUrl,
+        bytes: Number.isFinite(body.bytes) ? body.bytes : null,
+        width: Number.isFinite(body.width) ? body.width : null,
+        height: Number.isFinite(body.height) ? body.height : null,
+      })
+      .select("id")
+      .single();
     if (insertErr) throw insertErr;
 
     const newCount = used + 1;
     return NextResponse.json(
-      { ok: true, count: newCount, max, remaining: Math.max(0, max - newCount) },
+      {
+        ok: true,
+        id: inserted?.id,
+        public_id: publicId,
+        count: newCount,
+        max,
+        remaining: Math.max(0, max - newCount),
+      },
       { headers: NO_STORE }
     );
   } catch (e) {
