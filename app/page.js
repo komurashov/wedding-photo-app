@@ -86,6 +86,21 @@ export default function Home() {
       if (savedName) setName(savedName);
     } catch {}
     loadMine(id);
+    // лог открытия страницы (device_id ещё не в state — шлём напрямую)
+    try {
+      fetch("/api/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify({
+          device_id: id,
+          stage: "pageload",
+          ok: true,
+          ua: navigator.userAgent,
+          conn: navigator.connection ? navigator.connection.effectiveType : "",
+        }),
+      }).catch(() => {});
+    } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -132,21 +147,50 @@ export default function Home() {
     setItems((arr) => arr.map((x) => (x.key === key ? { ...x, ...patch } : x)));
   }
 
+  // диагностический лог (best-effort, не мешает загрузке)
+  function logEvent(stage, ok, detail) {
+    try {
+      fetch("/api/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify({
+          device_id: deviceId,
+          stage,
+          ok,
+          detail,
+          ua: typeof navigator !== "undefined" ? navigator.userAgent : "",
+          conn:
+            typeof navigator !== "undefined" && navigator.connection
+              ? navigator.connection.effectiveType
+              : "",
+        }),
+      }).catch(() => {});
+    } catch {}
+  }
+
   // загрузка одного файла: (подпись -> Cloudinary) -> confirm
   // cached — уже загруженный в Cloudinary результат (для «Повторить» без повторной заливки)
   async function uploadOne(key, file, cached) {
     patchItem(key, { status: "uploading" });
+    let stage = "start";
+    const t0 = Date.now();
     try {
+      logEvent("start", true, { size: file?.size, type: file?.type, cached: !!cached });
       let uploaded = cached;
 
-      // 1) если файл ещё не в Cloudinary — подписываем и грузим
+      // 1) если файл ещё не в Cloudinary — подписываем, сжимаем, грузим
       if (!uploaded) {
+        // подпись
+        stage = "sign";
+        let ts = Date.now();
         const sr = await fetch("/api/sign-upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ device_id: deviceId }),
         });
         const sign = await sr.json();
+        logEvent("sign", sr.ok, { status: sr.status, ms: Date.now() - ts, error: sr.ok ? undefined : sign.error });
         if (!sr.ok) {
           if (sign.error === "limit_reached") {
             setCount(sign.count ?? MAX);
@@ -156,14 +200,35 @@ export default function Home() {
           patchItem(key, { status: "failed" });
           return sign.error === "limit_reached" ? "limit" : "fail";
         }
-        // сжимаем перед отправкой (быстрее и надёжнее на слабой сети)
+
+        // сжатие
+        stage = "compress";
+        ts = Date.now();
         const toSend = await maybeCompress(file);
-        uploaded = await uploadToCloudinary(toSend, sign);
-        // запоминаем результат на плитке — повтор не будет грузить файл заново
+        logEvent("compress", true, { from: file?.size, to: toSend?.size, ms: Date.now() - ts });
+
+        // заливка в Cloudinary
+        stage = "cloudinary";
+        ts = Date.now();
+        try {
+          uploaded = await uploadToCloudinary(toSend, sign);
+          logEvent("cloudinary", true, { ms: Date.now() - ts, bytes: uploaded?.bytes });
+        } catch (e) {
+          logEvent("cloudinary", false, {
+            ms: Date.now() - ts,
+            message: String(e?.message || e),
+            status: e?.status,
+            body: e?.body,
+            cause: e?.cause,
+          });
+          throw e;
+        }
         patchItem(key, { uploaded });
       }
 
       // 2) подтверждение/запись (идемпотентно по public_id)
+      stage = "confirm";
+      const tc = Date.now();
       const cr = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -178,6 +243,7 @@ export default function Home() {
         }),
       });
       const cd = await cr.json();
+      logEvent("confirm", cr.ok, { status: cr.status, ms: Date.now() - tc, error: cr.ok ? undefined : cd.error, deduped: cd.deduped });
       if (!cr.ok) {
         patchItem(key, { status: "failed" });
         if (cd.error === "limit_reached") {
@@ -197,14 +263,24 @@ export default function Home() {
       });
       setCount(cd.count);
       setRemaining(cd.remaining);
+      logEvent("done", true, { totalMs: Date.now() - t0, count: cd.count });
       if (cd.remaining <= 0) {
         setBanner({ type: "done", text: `Готово! Загружено все ${MAX} фото. Спасибо! 💛` });
         return "limit";
       }
       return "ok";
-    } catch {
+    } catch (e) {
       patchItem(key, { status: "failed" });
       setBanner({ type: "err", text: "Не удалось загрузить фото. Можно повторить." });
+      logEvent("fail", false, {
+        stage,
+        totalMs: Date.now() - t0,
+        name: e?.name,
+        message: String(e?.message || e),
+        status: e?.status,
+        body: e?.body,
+        cause: e?.cause,
+      });
       return "fail";
     }
   }
@@ -427,13 +503,28 @@ async function uploadToCloudinary(file, sign) {
   form.append("signature", sign.signature);
   form.append("folder", sign.folder);
 
-  const res = await fetch(
-    `https://api.cloudinary.com/v1_1/${sign.cloudName}/image/upload`,
-    { method: "POST", body: form }
-  );
+  // тайм-аут: если заливка зависла — падаем за 90с, а не висим бесконечно
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 90000);
+  let res;
+  try {
+    res = await fetch(
+      `https://api.cloudinary.com/v1_1/${sign.cloudName}/image/upload`,
+      { method: "POST", body: form, signal: ctrl.signal }
+    );
+  } catch (e) {
+    clearTimeout(timer);
+    const err = new Error(e?.name === "AbortError" ? "cloudinary_timeout" : "cloudinary_network");
+    err.cause = String(e?.message || e);
+    throw err;
+  }
+  clearTimeout(timer);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error("cloudinary upload failed: " + txt);
+    const err = new Error("cloudinary_http");
+    err.status = res.status;
+    err.body = txt.slice(0, 300);
+    throw err;
   }
   return res.json();
 }
