@@ -1,6 +1,35 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import imageCompression from "browser-image-compression";
+
+// Настройки сжатия в зависимости от скорости сети.
+// На хорошей сети — щадящее сжатие (визуально как оригинал),
+// на слабой — сильнее, чтобы загрузка точно прошла.
+function compressionOptions() {
+  let slow = false;
+  try {
+    const c = navigator.connection;
+    if (c) {
+      if (c.saveData) slow = true;
+      if (["slow-2g", "2g", "3g"].includes(c.effectiveType)) slow = true;
+    }
+  } catch {}
+  return slow
+    ? { maxWidthOrHeight: 1280, maxSizeMB: 0.6, initialQuality: 0.6, useWebWorker: true }
+    : { maxWidthOrHeight: 2048, maxSizeMB: 2.2, initialQuality: 0.82, useWebWorker: true };
+}
+
+async function maybeCompress(file) {
+  if (!file || !file.type || !file.type.startsWith("image/")) return file;
+  try {
+    const out = await imageCompression(file, compressionOptions());
+    // если вдруг стало больше — берём оригинал
+    return out && out.size > 0 && out.size < file.size ? out : file;
+  } catch {
+    return file; // не смогли сжать — грузим как есть
+  }
+}
 
 const MAX = parseInt(process.env.NEXT_PUBLIC_MAX_PHOTOS || "10", 10) || 10;
 const TITLE = process.env.NEXT_PUBLIC_EVENT_TITLE || "Наша свадьба";
@@ -127,7 +156,9 @@ export default function Home() {
           patchItem(key, { status: "failed" });
           return sign.error === "limit_reached" ? "limit" : "fail";
         }
-        uploaded = await uploadToCloudinary(file, sign);
+        // сжимаем перед отправкой (быстрее и надёжнее на слабой сети)
+        const toSend = await maybeCompress(file);
+        uploaded = await uploadToCloudinary(toSend, sign);
         // запоминаем результат на плитке — повтор не будет грузить файл заново
         patchItem(key, { uploaded });
       }
