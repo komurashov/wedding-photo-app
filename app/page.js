@@ -61,6 +61,16 @@ function ensureDeviceId() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Встроенные браузеры приложений (Telegram, VK, Instagram и т.п.) часто
+// не открывают камеру у file-input — там лучше открыть страницу в Safari/Chrome.
+function isInAppBrowser() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /Telegram|Instagram|FBAN|FBAV|FB_IAB|VKClient|VKAndroidApp|OKApp|Viber|Line\/|WhatsApp|MicroMessenger/i.test(
+    ua
+  );
+}
+
 // небольшое превью из Cloudinary
 function thumb(url) {
   if (typeof url !== "string") return url;
@@ -75,6 +85,11 @@ export default function Home() {
   const [items, setItems] = useState([]); // {key,status,preview,file?,id?,publicId?}
   const [banner, setBanner] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [inApp, setInApp] = useState(false);
+
+  useEffect(() => {
+    setInApp(isInAppBrowser());
+  }, []);
 
   const cameraRef = useRef(null);
   const galleryRef = useRef(null);
@@ -439,6 +454,13 @@ export default function Home() {
       </header>
 
       <div className="card">
+        {inApp && (
+          <div className="banner warn" style={{ marginTop: 0, marginBottom: 14 }}>
+            📷 Чтобы работала кнопка «Сделать фото», откройте страницу в браузере:
+            нажмите «⋯» вверху → «Открыть в браузере» (Safari или Chrome).
+          </div>
+        )}
+
         <label htmlFor="name">Ваше имя</label>
         <input
           id="name"
@@ -472,6 +494,11 @@ export default function Home() {
             Из галереи
           </button>
         </div>
+
+        <p className="cam-hint">
+          «Сделать фото» открывает галерею? Откройте сайт в браузере телефона
+          (в Telegram: «⋯» → «Открыть в браузере»).
+        </p>
 
         {uploadingCount > 0 && (
           <div className="banner warn">

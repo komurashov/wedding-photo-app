@@ -190,6 +190,15 @@ input[type="text"]:focus {
   line-height: 1.5;
 }
 
+.cam-hint {
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 10px 0 0;
+  line-height: 1.4;
+  opacity: 0.85;
+}
+
 .banner {
   margin-top: 16px;
   padding: 12px 14px;
