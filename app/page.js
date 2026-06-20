@@ -59,6 +59,8 @@ function ensureDeviceId() {
   return id;
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // небольшое превью из Cloudinary
 function thumb(url) {
   if (typeof url !== "string") return url;
@@ -207,43 +209,68 @@ export default function Home() {
         const toSend = await maybeCompress(file);
         logEvent("compress", true, { from: file?.size, to: toSend?.size, ms: Date.now() - ts });
 
-        // заливка в Cloudinary
+        // заливка в Cloudinary с автоповтором при сетевых сбоях/тайм-ауте
         stage = "cloudinary";
-        ts = Date.now();
-        try {
-          uploaded = await uploadToCloudinary(toSend, sign);
-          logEvent("cloudinary", true, { ms: Date.now() - ts, bytes: uploaded?.bytes });
-        } catch (e) {
-          logEvent("cloudinary", false, {
-            ms: Date.now() - ts,
-            message: String(e?.message || e),
-            status: e?.status,
-            body: e?.body,
-            cause: e?.cause,
-          });
-          throw e;
+        let attempt = 0;
+        while (true) {
+          attempt++;
+          ts = Date.now();
+          try {
+            uploaded = await uploadToCloudinary(toSend, sign);
+            logEvent("cloudinary", true, { ms: Date.now() - ts, bytes: uploaded?.bytes, attempt });
+            break;
+          } catch (e) {
+            const retriable =
+              e?.message === "cloudinary_timeout" || e?.message === "cloudinary_network";
+            logEvent("cloudinary", false, {
+              ms: Date.now() - ts,
+              message: String(e?.message || e),
+              status: e?.status,
+              body: e?.body,
+              cause: e?.cause,
+              attempt,
+              willRetry: retriable && attempt < 3,
+            });
+            if (retriable && attempt < 3) {
+              await sleep(800 * attempt);
+              continue;
+            }
+            throw e;
+          }
         }
         patchItem(key, { uploaded });
       }
 
-      // 2) подтверждение/запись (идемпотентно по public_id)
+      // 2) подтверждение/запись (идемпотентно по public_id) с автоповтором
       stage = "confirm";
-      const tc = Date.now();
-      const cr = await fetch("/api/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          device_id: deviceId,
-          name: name.trim(),
-          public_id: uploaded.public_id,
-          secure_url: uploaded.secure_url,
-          bytes: uploaded.bytes,
-          width: uploaded.width,
-          height: uploaded.height,
-        }),
-      });
-      const cd = await cr.json();
-      logEvent("confirm", cr.ok, { status: cr.status, ms: Date.now() - tc, error: cr.ok ? undefined : cd.error, deduped: cd.deduped });
+      let cr, cd, cAttempt = 0;
+      while (true) {
+        cAttempt++;
+        const tc = Date.now();
+        try {
+          cr = await fetch("/api/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              device_id: deviceId,
+              name: name.trim(),
+              public_id: uploaded.public_id,
+              secure_url: uploaded.secure_url,
+              bytes: uploaded.bytes,
+              width: uploaded.width,
+              height: uploaded.height,
+            }),
+          });
+        } catch (e) {
+          logEvent("confirm", false, { ms: Date.now() - tc, message: String(e?.message || e), attempt: cAttempt, network: true });
+          if (cAttempt < 3) { await sleep(800 * cAttempt); continue; }
+          throw e;
+        }
+        cd = await cr.json().catch(() => ({}));
+        logEvent("confirm", cr.ok, { status: cr.status, ms: Date.now() - tc, error: cr.ok ? undefined : cd.error, deduped: cd.deduped, attempt: cAttempt });
+        if (!cr.ok && cr.status >= 500 && cAttempt < 3) { await sleep(800 * cAttempt); continue; }
+        break;
+      }
       if (!cr.ok) {
         patchItem(key, { status: "failed" });
         if (cd.error === "limit_reached") {
