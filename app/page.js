@@ -61,17 +61,6 @@ function ensureDeviceId() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// fetch с тайм-аутом: если запрос завис — обрываем через ms и даём повторить
-async function fetchWithTimeout(url, options = {}, ms = 20000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 // Встроенные браузеры приложений (Telegram, VK, Instagram и т.п.) часто
 // не открывают камеру у file-input — там лучше открыть страницу в Safari/Chrome.
 function isInAppBrowser() {
@@ -209,32 +198,16 @@ export default function Home() {
 
       // 1) если файл ещё не в Cloudinary — подписываем, сжимаем, грузим
       if (!uploaded) {
-        // подпись (тайм-аут 20с + автоповтор)
+        // подпись
         stage = "sign";
-        let sr, sign, sAttempt = 0;
-        while (true) {
-          sAttempt++;
-          const ts = Date.now();
-          try {
-            sr = await fetchWithTimeout(
-              "/api/sign-upload",
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ device_id: deviceId }),
-              },
-              20000
-            );
-          } catch (e) {
-            logEvent("sign", false, { ms: Date.now() - ts, message: String(e?.message || e), attempt: sAttempt, network: true });
-            if (sAttempt < 3) { await sleep(800 * sAttempt); continue; }
-            throw e;
-          }
-          sign = await sr.json().catch(() => ({}));
-          logEvent("sign", sr.ok, { status: sr.status, ms: Date.now() - ts, error: sr.ok ? undefined : sign.error, attempt: sAttempt });
-          if (!sr.ok && sr.status >= 500 && sAttempt < 3) { await sleep(800 * sAttempt); continue; }
-          break;
-        }
+        let ts = Date.now();
+        const sr = await fetch("/api/sign-upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_id: deviceId }),
+        });
+        const sign = await sr.json();
+        logEvent("sign", sr.ok, { status: sr.status, ms: Date.now() - ts, error: sr.ok ? undefined : sign.error });
         if (!sr.ok) {
           if (sign.error === "limit_reached") {
             setCount(sign.count ?? MAX);
@@ -290,23 +263,19 @@ export default function Home() {
         cAttempt++;
         const tc = Date.now();
         try {
-          cr = await fetchWithTimeout(
-            "/api/confirm",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                device_id: deviceId,
-                name: name.trim(),
-                public_id: uploaded.public_id,
-                secure_url: uploaded.secure_url,
-                bytes: uploaded.bytes,
-                width: uploaded.width,
-                height: uploaded.height,
-              }),
-            },
-            25000
-          );
+          cr = await fetch("/api/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              device_id: deviceId,
+              name: name.trim(),
+              public_id: uploaded.public_id,
+              secure_url: uploaded.secure_url,
+              bytes: uploaded.bytes,
+              width: uploaded.width,
+              height: uploaded.height,
+            }),
+          });
         } catch (e) {
           logEvent("confirm", false, { ms: Date.now() - tc, message: String(e?.message || e), attempt: cAttempt, network: true });
           if (cAttempt < 3) { await sleep(800 * cAttempt); continue; }
